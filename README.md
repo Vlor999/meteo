@@ -100,4 +100,3 @@ or
 ```bash
 make type-check
 ```
-
