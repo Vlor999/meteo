@@ -20,3 +20,9 @@ __pycache__/
 
 # env variables
 .env
+
+# cache
+.cache*
+
+# data
+data/

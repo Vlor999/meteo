@@ -6,6 +6,16 @@ authors = ["Willem Adnet <willem.adnet@grenoble-inp.org>"]
 readme = "README.md"
 requires-python = "==3.11.6"
 dependencies = [
+    "dotenv>=0.9.9",
+    "ipykernel>=7.1.0",
+    "loguru>=0.7.3",
+    "matplotlib>=3.10.7",
+    "numpy>=2.3.4",
+    "opencv-python>=4.11.0.86",
+    "openmeteo-requests>=1.7.4",
+    "pandas>=2.3.3",
+    "requests-cache>=1.2.1",
+    "retry-requests>=2.0.0",
 ]
 
 [dependency-groups]
