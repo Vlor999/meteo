@@ -116,19 +116,25 @@ def get_response(
                     curr_north, curr_south, curr_west, curr_est
                 )
                 bounding_boxes.extend(new_boxes)
+                failures += 1
 
             elif "API request limit exceeded" in reason:
                 logger.warning(f"Rate limit hit. Sleeping {waiting_time}s...")
                 time.sleep(waiting_time)
                 waiting_time = min(waiting_time * 2, 300)
+                # Re-add the current box to retry after sleep
+                bounding_boxes.appendleft((curr_north, curr_south, curr_west, curr_est))
+                # Remove from checked_boxes so it can be retried
+                checked_boxes.discard(key)
+                # Don't increment failures for rate limit - it's not a real failure
 
             else:
                 logger.warning(f"Unexpected error for {key}: {reason}")
                 time.sleep(2)
+                failures += 1
 
-            failures += 1
         logger.info(
-            f"Currently have: {len(result)} results and [{failures}/{max_retries}] failures"
+            f"Currently have: {len(results)} results and [{failures}/{max_retries}] failures"
         )
     return results
 
