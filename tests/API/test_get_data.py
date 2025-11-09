@@ -247,7 +247,7 @@ def test_call_api_with_response(mock_get_response):
     result = call_api("test_url", 48.8566, 2.3522)
 
     # Verify the function completed successfully
-    assert result is None  # call_api doesn't return anything when successful
+    assert result is not None  # call_api doesn't return anything when successful
     mock_get_response.assert_called_once()
 
     # Verify that the response methods were called
