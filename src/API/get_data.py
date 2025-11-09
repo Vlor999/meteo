@@ -55,7 +55,7 @@ def get_response(
     params_template: dict[str, Any],
     waiting_time: int = 70,
     max_locations: int = 1000,
-    max_retries: int = 200,
+    max_retries: int = 2000,
 ) -> list[list[WeatherApiResponse]]:
     """Sub cut the bouding boxe to have all the meteo data."""
     params = params_template.copy()
@@ -122,11 +122,8 @@ def get_response(
                 logger.warning(f"Rate limit hit. Sleeping {waiting_time}s...")
                 time.sleep(waiting_time)
                 waiting_time = min(waiting_time * 2, 300)
-                # Re-add the current box to retry after sleep
                 bounding_boxes.appendleft((curr_north, curr_south, curr_west, curr_est))
-                # Remove from checked_boxes so it can be retried
                 checked_boxes.discard(key)
-                # Don't increment failures for rate limit - it's not a real failure
 
             else:
                 logger.warning(f"Unexpected error for {key}: {reason}")
@@ -139,7 +136,9 @@ def get_response(
     return results
 
 
-def call_api(url: str, lat: float | int, long: float | int) -> None:
+def call_api(
+    url: str, lat: float | int, long: float | int
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Main function that get the responses and add informations together."""
     cache_session = requests_cache.CachedSession(".cache", expire_after=3600)
     retry_session = retry(cache_session, retries=5, backoff_factor=0.2)
@@ -173,7 +172,10 @@ def call_api(url: str, lat: float | int, long: float | int) -> None:
     )
     if responses is None:
         return
-    print(len(responses))
+    logger.info(len(responses))
+
+    daily_dataframe = pd.DataFrame()
+    hourly_dataframe = pd.DataFrame()
 
     # Process 1 location and 3 models
     for local_reponse in responses:
@@ -208,8 +210,8 @@ def call_api(url: str, lat: float | int, long: float | int) -> None:
             hourly_data["is_day"] = hourly_is_day
             hourly_data["sunshine_duration"] = hourly_sunshine_duration
 
-            hourly_dataframe = pd.DataFrame(data=hourly_data)
-            print("\nHourly data\n", hourly_dataframe)
+            current_hourly_data = pd.DataFrame(data=hourly_data)
+            hourly_dataframe = pd.concat([hourly_dataframe, current_hourly_data])
 
             # Process daily data.
             # The order of variables needs to be the same as requested.
@@ -233,8 +235,10 @@ def call_api(url: str, lat: float | int, long: float | int) -> None:
             daily_data["apparent_temperature_max"] = daily_apparent_temperature_max
             daily_data["apparent_temperature_min"] = daily_apparent_temperature_min
 
-            daily_dataframe = pd.DataFrame(data=daily_data)
-            print("\nDaily data\n", daily_dataframe)
+            current_daily_data = pd.DataFrame(data=daily_data)
+            daily_dataframe = pd.concat([hourly_dataframe, current_daily_data])
+
+    return daily_dataframe, hourly_dataframe
 
 
 if __name__ == "__main__":
