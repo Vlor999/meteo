@@ -1,7 +1,6 @@
 """Get the current data of the weather API."""
 
 import time
-from collections import deque
 from os import environ
 from typing import Any
 
@@ -12,6 +11,19 @@ from dotenv import load_dotenv
 from loguru import logger
 from openmeteo_requests.Client import WeatherApiResponse
 from retry_requests import retry
+
+from src.API.store_data import extract_data
+from src.API.utils import get_sized_bboxes, write_bbox
+from src.API.weather_mods import WeatherMode
+from src.IOHandler.write_data import save_dataframe
+from src.params import (
+    DATA_DIR,
+    QUERY_TEMPLATE,
+    REPLACE_TOKEN,
+    TEMPLATE_DAILY_CSV,
+    TEMPLATE_HOURLY_CSV,
+)
+from src.utils.default_values import get_coordinates
 
 load_dotenv()
 
@@ -42,7 +54,9 @@ def create_new_rectangles(
 
 def estimate_grid_size(north: float, south: float, west: float, est: float) -> float:
     """Rough heuristic: 0.1° step ≈ 11 km, used by Open-Meteo models."""
-    return abs(north - south) * abs(est - west) / 0.1**2
+    val = abs(north - south) * abs(est - west) / 0.01
+    logger.debug(f"Current estimation of the grid size: {val}")
+    return val
 
 
 def get_response(
@@ -54,18 +68,21 @@ def get_response(
     est: float,
     params_template: dict[str, Any],
     waiting_time: int = 70,
-    max_locations: int = 1000,
+    max_locations: int = 100,
     max_retries: int = 2000,
 ) -> list[list[WeatherApiResponse]]:
     """Sub cut the bouding boxe to have all the meteo data."""
     params = params_template.copy()
-    bounding_boxes = deque([(north, south, west, est)])
+    # bounding_boxes = deque([(north, south, west, est)])
+    bounding_boxes = get_sized_bboxes(default_bbox=(north, south, west, est))
     results = []
     checked_boxes = set()
     failures = 0
+    must_save = True
 
     while bounding_boxes and failures < max_retries:
-        curr_north, curr_south, curr_west, curr_est = bounding_boxes.popleft()
+        head = bounding_boxes.popleft()
+        curr_north, curr_south, curr_west, curr_est = head
 
         # Skip duplicate boxes
         key = (
@@ -106,6 +123,12 @@ def get_response(
             result = openmeteo.weather_api(url, params)
             results.append(result)
             logger.info(f"Success for box {key}, total results: {len(results)}")
+            if must_save:
+                cp_bouding = bounding_boxes.copy()
+                cp_bouding.extend([(curr_north, curr_south, curr_west, curr_est)])
+                write_bbox(cp_bouding)
+                must_save = False
+            return results  # TODO: change it later for multiple results
         except Exception as e:
             reason = e.args[0] if e.args else str(e)
 
@@ -121,7 +144,7 @@ def get_response(
             elif "API request limit exceeded" in reason:
                 logger.warning(f"Rate limit hit. Sleeping {waiting_time}s...")
                 time.sleep(waiting_time)
-                waiting_time = min(waiting_time * 2, 300)
+                waiting_time = min(waiting_time << 1, 300)
                 bounding_boxes.appendleft((curr_north, curr_south, curr_west, curr_est))
                 checked_boxes.discard(key)
 
@@ -143,104 +166,83 @@ def call_api(
     cache_session = requests_cache.CachedSession(".cache", expire_after=3600)
     retry_session = retry(cache_session, retries=5, backoff_factor=0.2)
     openmeteo = openmeteo_requests.Client(session=retry_session)
-    # Setup the Open-Meteo API client with cache and retry on error
-    params = {
-        "latitude": lat,
-        "longitude": long,
-        "daily": [
-            "uv_index_max",
-            "apparent_temperature_max",
-            "apparent_temperature_min",
-        ],
-        "hourly": ["temperature_2m", "rain", "is_day", "sunshine_duration"],
-        "models": ["arpege_europe", "arome_france", "arome_france_hd"],
-        "timezone": "Europe/Berlin",
-        "wind_speed_unit": "ms",
-        "bounding_box": "<SOUTH>,<WEST>,<NORTH>,<EST>",  # South, West, North, Est
-        "start_date": "2025-11-01",  # YYYY-MM-DD
-        "end_date": "2025-11-15",
-    }
+
+    # Setup the Open-Meteo API client with ALL available weather variables
+    params = QUERY_TEMPLATE.copy()
+
+    params["latitude"] = lat
+    params["longitude"] = long
+
+    north, south, west, est = get_coordinates()
 
     responses = get_response(
         openmeteo=openmeteo,
         url=url,
-        north=51.0,
-        south=41.0,
-        west=5.0,
-        est=10.0,
+        north=north,
+        south=south,
+        west=west,
+        est=est,
         params_template=params,
     )
-    if responses is None:
-        return
-    logger.info(len(responses))
+    logger.info(f"Received {len(responses)} response groups")
 
-    daily_dataframe = pd.DataFrame()
-    hourly_dataframe = pd.DataFrame()
+    dataframes_hourly_daily = {mode: pd.DataFrame() for mode in WeatherMode}
 
-    # Process 1 location and 3 models
     for local_reponse in responses:
         for response in local_reponse:
-            print(f"\nCoordinates: {response.Latitude()}°N {response.Longitude()}°E")
-            print(f"Elevation: {response.Elevation()} m asl")
-            print(f"Timezone: {response.Timezone()}{response.TimezoneAbbreviation()}")
-            print(f"Timezone difference to GMT+0: {response.UtcOffsetSeconds()}s")
-            print(f"Model Nº: {response.Model()}")
+            current_lat, current_long = response.Latitude(), response.Longitude()
+            elevation = response.Elevation()
+            timezone = response.Timezone()
+            model = response.Model()
 
-            # Process hourly data.
-            # The order of variables needs to be the same as requested.
+            # Process hourly and daily data - ALL VARIABLES
             hourly = response.Hourly()
-            if hourly is None:
-                continue
-            hourly_temperature_2m = hourly.Variables(0).ValuesAsNumpy()
-            hourly_rain = hourly.Variables(1).ValuesAsNumpy()
-            hourly_is_day = hourly.Variables(2).ValuesAsNumpy()
-            hourly_sunshine_duration = hourly.Variables(3).ValuesAsNumpy()
-
-            hourly_data: dict[str, Any] = {
-                "date": pd.date_range(
-                    start=pd.to_datetime(hourly.Time(), unit="s", utc=True),
-                    end=pd.to_datetime(hourly.TimeEnd(), unit="s", utc=True),
-                    freq=pd.Timedelta(seconds=hourly.Interval()),
-                    inclusive="left",
-                )
-            }
-
-            hourly_data["temperature_2m"] = hourly_temperature_2m
-            hourly_data["rain"] = hourly_rain
-            hourly_data["is_day"] = hourly_is_day
-            hourly_data["sunshine_duration"] = hourly_sunshine_duration
-
-            current_hourly_data = pd.DataFrame(data=hourly_data)
-            hourly_dataframe = pd.concat([hourly_dataframe, current_hourly_data])
-
-            # Process daily data.
-            # The order of variables needs to be the same as requested.
             daily = response.Daily()
-            if daily is None:
-                continue
-            daily_uv_index_max = daily.Variables(0).ValuesAsNumpy()
-            daily_apparent_temperature_max = daily.Variables(1).ValuesAsNumpy()
-            daily_apparent_temperature_min = daily.Variables(2).ValuesAsNumpy()
-
-            daily_data: dict[str, Any] = {
-                "date": pd.date_range(
-                    start=pd.to_datetime(daily.Time(), unit="s", utc=True),
-                    end=pd.to_datetime(daily.TimeEnd(), unit="s", utc=True),
-                    freq=pd.Timedelta(seconds=daily.Interval()),
-                    inclusive="left",
-                )
+            responses_daily_hourly = {
+                WeatherMode.HOURLY: hourly,
+                WeatherMode.DAILY: daily,
             }
 
-            daily_data["uv_index_max"] = daily_uv_index_max
-            daily_data["apparent_temperature_max"] = daily_apparent_temperature_max
-            daily_data["apparent_temperature_min"] = daily_apparent_temperature_min
+            for mode in WeatherMode:
+                current_data: dict[str, Any] = {
+                    "latitude": current_lat,
+                    "longitude": current_long,
+                    "elevation": elevation,
+                    "timezone": timezone,
+                    "model": model,
+                }
 
-            current_daily_data = pd.DataFrame(data=daily_data)
-            daily_dataframe = pd.concat([hourly_dataframe, current_daily_data])
+                extracted_data = extract_data(
+                    current_data, responses_daily_hourly[mode], mode
+                )
+                df_extracted = pd.DataFrame(extracted_data)
+                dataframes_hourly_daily[mode] = pd.concat(
+                    [dataframes_hourly_daily[mode], df_extracted]
+                )
 
+    daily_dataframe = dataframes_hourly_daily[WeatherMode.DAILY]
+    hourly_dataframe = dataframes_hourly_daily[WeatherMode.HOURLY]
     return daily_dataframe, hourly_dataframe
+
+
+def get_and_save_data(
+    url: str,
+    latitude: float = 8.866667,
+    longitude: float = 2.333333,
+    replace_tok_daily: str = "",
+    replace_tok_hourly: str = "",
+) -> None:
+    """Extract all the informations and store everything into the defined csv."""
+    daily_dataframe, hourly_dataframe = call_api(url=url, lat=latitude, long=longitude)
+    daily_csv = f"{DATA_DIR}/{TEMPLATE_DAILY_CSV}".replace(
+        REPLACE_TOKEN, replace_tok_daily
+    )
+    hourly_csv = f"{DATA_DIR}/{TEMPLATE_HOURLY_CSV}".replace(
+        REPLACE_TOKEN, replace_tok_hourly
+    )
+    save_dataframe([daily_dataframe, hourly_dataframe], [daily_csv, hourly_csv])
 
 
 if __name__ == "__main__":
     URL = environ["URL"]
-    call_api(url=URL, lat=48.866667, long=2.333333)
+    get_and_save_data(url=URL)
