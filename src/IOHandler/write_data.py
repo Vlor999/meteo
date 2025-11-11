@@ -27,11 +27,11 @@ def save_dataframe(
         )
         return
 
-    mode = mode.upper()
-
-    errors = 0
     for i, frame in enumerate(dataframes):
         filename = filenames[i]
+        logger.info(
+            f"Processing dataframe {i}: shape={frame.shape}, empty={frame.empty}"
+        )
         if filename.endswith(".csv"):
             if mode == SaveMode.MERGE:
                 logger.info(f"Starting to merge the data between input and {filename}")
@@ -55,19 +55,27 @@ def save_dataframe(
                 logger.info(
                     f"Creating or overwrtting the data from the file: {filename}"
                 )
-                frame.to_csv(
-                    path_or_buf=filename,
-                    sep=sep,
-                    mode="w",
-                    header=True,
-                    index_label=index_label,
-                )
+                try:
+                    logger.info(
+                        f"About to write to {filename}, dataframe shape: {frame.shape}"
+                    )
+                    frame.to_csv(
+                        path_or_buf=filename,
+                        sep=sep,
+                        mode="w",
+                        header=True,
+                        index_label=index_label,
+                    )
+                    logger.info(f"Successfully wrote to {filename}")
+                except Exception as e:
+                    logger.error(f"Error writing to {filename}: {e}")
+                    raise
         else:
             logger.warning(f'The filename: {filename} does not the ".csv" format')
-            errors += 1
-
-    if errors == 0:
-        logger.success(f"No errors while using mode: {mode} to save the data")
+            continue
+        logger.success(
+            f"No errors while using mode: {mode} to save the data into : {filename}"
+        )
 
 
 if __name__ == "__main__":
