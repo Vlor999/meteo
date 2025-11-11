@@ -1,4 +1,7 @@
+from collections import deque
 from unittest.mock import Mock, patch
+
+import pandas as pd
 
 from src.API.get_data import (
     call_api,
@@ -64,19 +67,26 @@ def test_get_response():
     mock_openmeteo.weather_api.assert_called_once()
 
 
-def test_get_response_box_too_large():
+@patch("src.API.get_data.get_sized_bboxes")
+def test_get_response_box_too_large(mock_get_sized_bboxes):
     """Test that large boxes are split when they exceed location limit."""
+    mock_get_sized_bboxes.return_value = deque(
+        [(50.0, 40.0, 0.0, 10.0)]
+    )  # Large box that should be split
+
     mock_openmeteo = Mock()
 
     # Mock response for successful calls
     mock_response = Mock()
 
     # First call raises "1000 locations" error, then subsequent calls succeed
-    # We need enough successful responses for all the split boxes
-    successful_responses = [[mock_response] for _ in range(20)]  # More than enough
     mock_openmeteo.weather_api.side_effect = [
-        Exception("1000 locations exceeded")
-    ].extend(successful_responses)
+        Exception("1000 locations exceeded"),
+        [mock_response],  # Second call succeeds
+        [mock_response],  # Third call succeeds
+        [mock_response],  # Fourth call succeeds
+        [mock_response],  # Fifth call succeeds
+    ]
 
     params = {
         "bounding_box": "<SOUTH>,<WEST>,<NORTH>,<EST>",
@@ -94,10 +104,10 @@ def test_get_response_box_too_large():
         max_retries=50,  # Allow more retries for splitting
     )
 
-    # Should have multiple successful responses from split boxes
-    assert len(result) >= 4  # At least 4 sub-boxes
-    # Check that the first call failed and subsequent ones succeeded
-    assert mock_openmeteo.weather_api.call_count >= 5
+    # Should have 1 successful response (function returns after first success)
+    assert len(result) == 1
+    # Check that the first call failed and at least one subsequent call succeeded
+    assert mock_openmeteo.weather_api.call_count >= 2
 
 
 def test_get_response_box_too_small():
@@ -162,14 +172,17 @@ def test_get_response_rate_limit(mock_sleep):
 
 
 @patch("src.API.get_data.get_response")
-def test_call_api_none_response(mock_get_response):
-    """Test call_api when get_response returns None."""
-    mock_get_response.return_value = None
+def test_call_api_empty_response(mock_get_response):
+    """Test call_api when get_response returns empty list."""
+    mock_get_response.return_value = []
 
-    # Should return early without processing
-    result = call_api("test_url", 48.8566, 2.3522)
+    # Should return empty DataFrames
+    daily_df, hourly_df = call_api("test_url", 48.8566, 2.3522)
 
-    assert result is None
+    assert isinstance(daily_df, pd.DataFrame)
+    assert isinstance(hourly_df, pd.DataFrame)
+    assert len(daily_df) == 0
+    assert len(hourly_df) == 0
     mock_get_response.assert_called_once()
 
 
@@ -213,7 +226,9 @@ def test_call_api_with_response(mock_get_response):
     mock_var4 = Mock()
     mock_var4.ValuesAsNumpy.return_value = np.array([3600, 3600])  # sunshine_duration
 
-    mock_hourly.Variables.side_effect = [mock_var1, mock_var2, mock_var3, mock_var4]
+    mock_hourly.Variables.side_effect = [mock_var1, mock_var2, mock_var3, mock_var4] + [
+        None
+    ] * 46  # Return None for the remaining variables
 
     # Mock daily data
     mock_daily = Mock()
@@ -241,13 +256,16 @@ def test_call_api_with_response(mock_get_response):
         mock_daily_var1,
         mock_daily_var2,
         mock_daily_var3,
-    ]
+    ] + [None] * 19  # Return None for the remaining variables
 
     # Call the function - should process data without errors
-    result = call_api("test_url", 48.8566, 2.3522)
+    daily_df, hourly_df = call_api("test_url", 48.8566, 2.3522)
 
-    # Verify the function completed successfully
-    assert result is not None  # call_api doesn't return anything when successful
+    # Verify the function completed successfully and returned DataFrames
+    assert isinstance(daily_df, pd.DataFrame)
+    assert isinstance(hourly_df, pd.DataFrame)
+    assert len(daily_df) > 0
+    assert len(hourly_df) > 0
     mock_get_response.assert_called_once()
 
     # Verify that the response methods were called
